@@ -14,10 +14,10 @@ license covered.
 
 ```sh
 brew tap frarredondo/btt-tap
-brew install --cask frarredondo/btt-tap/bettertouchtool@4.363
+brew install --cask frarredondo/btt-tap/btt@4.363
 ```
 
-(After tapping, the short form `brew install --cask bettertouchtool@4.363` also works.)
+(After tapping, the short form `brew install --cask btt@4.363` also works.)
 
 To upgrade/downgrade to a different version, see [Add another version](#add-another-version) below.
 
@@ -32,7 +32,7 @@ Currently shipped:
 
 | Version | Build  | Cask token                |
 | ------- | ------ | ------------------------- |
-| 4.363   | 43630  | `bettertouchtool@4.363`   |
+| 4.363   | 43630  | `btt@4.363`   |
 
 Every version ever published is listed at <https://folivora.ai/releases/>, or run
 `./generate.sh --list`.
@@ -59,7 +59,7 @@ guesses a dead URL), verifies the download exists, hashes it, and writes the cas
 Then install it (and optionally commit + push the new cask to share it):
 
 ```sh
-brew install --cask ./Casks/bettertouchtool@5.612.rb
+brew install --cask ./Casks/btt@5.612.rb
 ```
 
 ## Caveats
@@ -69,16 +69,16 @@ brew install --cask ./Casks/bettertouchtool@5.612.rb
   existing one. To switch:
 
   ```sh
-  brew uninstall --cask bettertouchtool@4.363
-  brew install --cask frarredondo/btt-tap/bettertouchtool@5.612
+  brew uninstall --cask btt@4.363
+  brew install --cask frarredondo/btt-tap/btt@5.612
   # …or force an in-place swap:
-  brew install --cask --force frarredondo/btt-tap/bettertouchtool@5.612
+  brew install --cask --force frarredondo/btt-tap/btt@5.612
   ```
 
 - **Staying pinned.** The cask sets `auto_updates true` (accurate: BTT can update itself). If you are
   pinning to avoid a newer build, disable automatic updates inside BetterTouchTool's own preferences.
 
-- **Clean removal.** `brew uninstall --zap --cask bettertouchtool@4.363` also removes BTT's
+- **Clean removal.** `brew uninstall --zap --cask btt@4.363` also removes BTT's
   preferences, application-support, and cache files.
 
 ## License

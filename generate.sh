@@ -4,7 +4,7 @@
 #
 # It looks the requested version up in the LIVE folivora.ai release index (constructed
 # URLs are not trusted — some 404), verifies the file exists with a ranged request,
-# downloads it once to compute a real sha256, and writes Casks/bettertouchtool@<short>.rb.
+# downloads it once to compute a real sha256, and writes Casks/btt@<short>.rb.
 #
 # Usage:
 #   ./generate.sh <version>     e.g. ./generate.sh 4.363   (or the full 4.363-43630)
@@ -192,7 +192,7 @@ should_generate() {
 
 gen_one() {
   local short="$1" build="$2" token vcsv url sha has_build minos sym depends_line=""
-  token="bettertouchtool@$short"
+  token="btt@$short"
   if ! should_generate "$token"; then
     info "skip: $token already exists (use --force to regenerate)"
     return 0
@@ -233,7 +233,7 @@ main() {
     list)
       printf '%-10s %-12s %-12s %s\n' "VERSION" "DATE" "BUILD" "TOKEN"
       printf '%s\n' "$index" | sort -t"$SEP" -k1,1V -k2,2V | while IFS="$SEP" read -r s b fn reldate; do
-        printf '%-10s %-12s %-12s %s\n' "$s" "${reldate:-—}" "${b:-—}" "bettertouchtool@$s"
+        printf '%-10s %-12s %-12s %s\n' "$s" "${reldate:-—}" "${b:-—}" "btt@$s"
       done
       ;;
     latest)

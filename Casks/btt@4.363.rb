@@ -1,4 +1,4 @@
-cask "bettertouchtool@4.363" do
+cask "btt@4.363" do
   version "4.363,43630"
   sha256 "67ed717e7254c76d6797f9e8a6f2ee9acd0cbca35b31c41099887ea8e00b3135"
 
