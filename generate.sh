@@ -9,7 +9,7 @@
 # Usage:
 #   ./generate.sh <version>     e.g. ./generate.sh 4.363   (or the full 4.363-43630)
 #   ./generate.sh --latest      newest version in the upstream index
-#   ./generate.sh --list        print the parsed {version, build, token} table (no writes)
+#   ./generate.sh --list        print the parsed {version, date, build, token} table (no writes)
 #
 # Flags:
 #   --force        regenerate even if an up-to-date cask already exists
@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CASKS_DIR="$SCRIPT_DIR/Casks"
 FORCE=0
 TMP_ZIP=""
+SEP=$'\037'   # internal field separator (ASCII Unit Separator): non-whitespace, so
+              # `read` preserves empty fields (e.g. the blank build of legacy releases)
 
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*" >&2; }
@@ -40,7 +42,7 @@ generate.sh — add a specific BetterTouchTool version to this tap as a cask.
 Usage:
   ./generate.sh <version>     e.g. ./generate.sh 4.363   (or the full 4.363-43630)
   ./generate.sh --latest      newest version in the upstream index
-  ./generate.sh --list        print the parsed {version, build, token} table (no writes)
+  ./generate.sh --list        print the parsed {version, date, build, token} table (no writes)
 
 Flags:
   --force        regenerate even if an up-to-date cask already exists
@@ -48,23 +50,34 @@ Flags:
 EOF
 }
 
-# Fetch the release index and emit TSV records: short<TAB>build<TAB>filename
-# `build` is empty for legacy (no-build) filenames. Junk/variant filenames are skipped:
+# Fetch the release index and emit TSV records: short<TAB>build<TAB>filename<TAB>date
+# `build` is empty for legacy (no-build) filenames; `date` is the upstream release
+# (last-modified) date as YYYY-MM-DD, pulled from the autoindex "indexcollastmod"
+# column. awk does the HTML scrape (portable: BSD sed won't emit \t). Junk/variant
+# filenames are skipped:
 #   - URL-encoded names and "... copy.zip"     (contain % or "copy")
 #   - underscore variants (btt_setapp_..., btt_2.428_recovery_mojave.zip)
 #   - letter-suffixed betas (btt5.662b-..., btt3.211b.zip) fail the numeric regexes
 parse_index() {
   curl -fsSL --max-time 60 "$RELEASES_URL" \
-    | grep -oE 'href="btt[^"]+\.zip"' \
-    | sed -E 's/^href="//; s/"$//' \
-    | while IFS= read -r fn; do
+    | awk '
+        /href="btt[^"]+\.zip"/ {
+          if (match($0, /href="btt[^"]+\.zip"/)) {
+            fn = substr($0, RSTART + 6, RLENGTH - 7)   # strip href=" and trailing "
+            d = ""
+            if (match($0, /indexcollastmod">[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/))
+              d = substr($0, RSTART + 17, 10)          # the YYYY-MM-DD after the tag
+            print fn "\t" d
+          }
+        }' \
+    | while IFS=$'\t' read -r fn reldate; do
         case "$fn" in
           *%*|*_*|*'$'*|*copy*) continue ;;
         esac
         if [[ "$fn" =~ ^btt([0-9]+\.[0-9]+)-([0-9]+)\.zip$ ]]; then
-          printf '%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$fn"
+          printf "%s${SEP}%s${SEP}%s${SEP}%s\n" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "$fn" "$reldate"
         elif [[ "$fn" =~ ^btt([0-9]+\.[0-9]+)\.zip$ ]]; then
-          printf '%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "" "$fn"
+          printf "%s${SEP}%s${SEP}%s${SEP}%s\n" "${BASH_REMATCH[1]}" "" "$fn" "$reldate"
         fi
       done
 }
@@ -198,7 +211,7 @@ gen_one() {
 }
 
 main() {
-  local mode="" target="" index match s b fn
+  local mode="" target="" index match s b fn reldate
   [[ $# -eq 0 ]] && { usage; exit 2; }
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -218,21 +231,21 @@ main() {
 
   case "$mode" in
     list)
-      printf '%-10s %-14s %s\n' "VERSION" "BUILD" "TOKEN"
-      printf '%s\n' "$index" | sort -t$'\t' -k1,1V -k2,2V | while IFS=$'\t' read -r s b fn; do
-        printf '%-10s %-14s %s\n' "$s" "${b:-—}" "bettertouchtool@$s"
+      printf '%-10s %-12s %-12s %s\n' "VERSION" "DATE" "BUILD" "TOKEN"
+      printf '%s\n' "$index" | sort -t"$SEP" -k1,1V -k2,2V | while IFS="$SEP" read -r s b fn reldate; do
+        printf '%-10s %-12s %-12s %s\n' "$s" "${reldate:-—}" "${b:-—}" "bettertouchtool@$s"
       done
       ;;
     latest)
-      match="$(printf '%s\n' "$index" | sort -t$'\t' -k1,1V -k2,2V | tail -1)"
-      IFS=$'\t' read -r s b fn <<< "$match"
-      info "latest upstream version: $s${b:+-$b}"
+      match="$(printf '%s\n' "$index" | sort -t"$SEP" -k1,1V -k2,2V | tail -1)"
+      IFS="$SEP" read -r s b fn reldate <<< "$match"
+      info "latest upstream version: $s${b:+-$b}${reldate:+  ($reldate)}"
       gen_one "$s" "$b"
       ;;
     one)
-      match="$(printf '%s\n' "$index" | awk -F'\t' -v v="$target" '$1==v || ($1"-"$2)==v {print; exit}')"
+      match="$(printf '%s\n' "$index" | awk -F"$SEP" -v v="$target" '$1==v || ($1"-"$2)==v {print; exit}')"
       [[ -n "$match" ]] || die "version '$target' not found upstream (try: ./generate.sh --list)"
-      IFS=$'\t' read -r s b fn <<< "$match"
+      IFS="$SEP" read -r s b fn reldate <<< "$match"
       gen_one "$s" "$b"
       ;;
   esac
