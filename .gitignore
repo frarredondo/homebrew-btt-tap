@@ -1,0 +1,7 @@
+# Never commit downloaded release archives or generator temp files
+*.zip
+btt-cask.*
+btt.*.zip
+
+# macOS cruft
+.DS_Store

@@ -1,0 +1,40 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Fast, dependency-free gate: Ruby syntax of every cask + shell syntax of the generator.
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check cask + script syntax
+        run: |
+          fail=0
+          for f in Casks/*.rb; do
+            echo "ruby -c $f"
+            ruby -c "$f" || fail=1
+          done
+          echo "bash -n generate.sh"
+          bash -n generate.sh || fail=1
+          exit $fail
+
+  # Real Homebrew cask audit (macOS only). Advisory — does not block merges.
+  brew-audit:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: brew style + audit
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          tapdir="$(brew --repository)/Library/Taps/${owner}/homebrew-btt-tap"
+          mkdir -p "$(dirname "$tapdir")"
+          ln -s "$GITHUB_WORKSPACE" "$tapdir"
+          brew style "${owner}/btt-tap" || true
+          for f in Casks/*.rb; do
+            token="$(basename "$f" .rb)"
+            brew audit --cask --tap "${owner}/btt-tap" "$token" || true
+          done
