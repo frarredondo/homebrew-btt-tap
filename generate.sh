@@ -7,11 +7,13 @@
 # downloads it once to compute a real sha256, and writes Casks/btt@<short>.rb.
 #
 # Usage:
+#   ./generate.sh               interactive TUI (in a terminal): browse/filter/multi-select versions
 #   ./generate.sh <version>     e.g. ./generate.sh 4.363   (or the full 4.363-43630)
 #   ./generate.sh --latest      newest version in the upstream index
 #   ./generate.sh --list        print the parsed {version, date, build, token} table (no writes)
 #
 # Flags:
+#   --tui, -i      force the interactive TUI
 #   --force        regenerate even if an up-to-date cask already exists
 #   -h, --help     show this help
 
@@ -24,27 +26,47 @@ FORCE=0
 TMP_ZIP=""
 SEP=$'\037'   # internal field separator (ASCII Unit Separator): non-whitespace, so
               # `read` preserves empty fields (e.g. the blank build of legacy releases)
+E=$'\e'       # ESC, for ANSI/VT100 sequences (more portable than printf '\e')
+TUI_ACTIVE=0  # 1 while the alternate-screen TUI is on (so cleanup can restore it)
+LINES=24; COLUMNS=80
 
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*" >&2; }
 
+# Switch to/from the alternate screen (hide cursor, no line-wrap, no key echo).
+setup_terminal() {
+  printf '%s[?1049h%s[?25l%s[?7l' "$E" "$E" "$E"
+  stty -echo 2>/dev/null
+  TUI_ACTIVE=1
+}
+teardown_terminal() {
+  [[ "$TUI_ACTIVE" == "1" ]] || return 0
+  stty echo 2>/dev/null
+  printf '%s[?7h%s[?25h%s[?1049l' "$E" "$E" "$E"
+  TUI_ACTIVE=0
+}
+
 cleanup() {
   local rc=$?
+  teardown_terminal
   [[ -n "$TMP_ZIP" && -f "$TMP_ZIP" ]] && rm -f "$TMP_ZIP"
   exit "$rc"   # preserve the real exit status (a trap's last command would otherwise set it)
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 usage() {
   cat >&2 <<'EOF'
 generate.sh — add a specific BetterTouchTool version to this tap as a cask.
 
 Usage:
+  ./generate.sh               interactive TUI (when run in a terminal): browse, filter,
+                              multi-select versions and generate their casks
   ./generate.sh <version>     e.g. ./generate.sh 4.363   (or the full 4.363-43630)
   ./generate.sh --latest      newest version in the upstream index
   ./generate.sh --list        print the parsed {version, date, build, token} table (no writes)
 
 Flags:
+  --tui, -i      force the interactive TUI
   --force        regenerate even if an up-to-date cask already exists
   -h, --help     show this help
 EOF
@@ -134,9 +156,9 @@ download() {
   TMP_ZIP="$(mktemp "${TMPDIR:-/tmp}/btt-cask.XXXXXX")"
   info "downloading $url ..."
   curl -fL --retry 3 --retry-delay 2 --max-time 1800 -o "$TMP_ZIP" "$url" \
-    || die "download failed: $url"
+    || { info "download failed: $url"; return 1; }
   size="$(stat -f%z "$TMP_ZIP" 2>/dev/null || stat -c%s "$TMP_ZIP" 2>/dev/null || echo 0)"
-  [[ "$size" -gt 1000000 ]] || die "downloaded file is only ${size} bytes — not a real zip? $url"
+  [[ "$size" -gt 1000000 ]] || { info "downloaded file is only ${size} bytes — not a real zip? $url"; return 1; }
 }
 
 # Render Casks/<token>.rb. has_build=1 → CSV version + interpolated build URL.
@@ -199,22 +221,202 @@ gen_one() {
   fi
   if [[ -n "$build" ]]; then vcsv="$short,$build"; has_build=1; else vcsv="$short"; has_build=0; fi
   url="$(build_url "$short" "$build")"
-  remote_exists "$url" || die "upstream file not reachable (404?): $url"
-  download "$url"                              # sets $TMP_ZIP in this (parent) scope
+  remote_exists "$url" || { info "upstream file not reachable (404?): $url"; return 1; }
+  download "$url" || return 1                  # sets $TMP_ZIP in this (parent) scope
   sha="$(shasum -a 256 "$TMP_ZIP" | awk '{print $1}')"
   minos="$(min_macos "$TMP_ZIP")"              # real minimum macOS from the app bundle
   sym="$(macos_symbol "$minos")"
   # A bare symbol means ">= that version" (the string ">= :sym" form is deprecated).
   [[ -n "$sym" ]] && depends_line="  depends_on macos: :$sym"
   render_cask "$token" "$vcsv" "$has_build" "$sha" "$depends_line"
+  rm -f "$TMP_ZIP"; TMP_ZIP=""                 # done with the download; don't accumulate temps
   info "done: $token  (sha256 $sha; min macOS ${minos:-unknown})"
+}
+
+# ---------------------------------------------------------------------------
+# Interactive TUI — pure bash 3.2 (ANSI escapes + read + trap; no libraries).
+# Rendering is ASCII-only so printf width specifiers stay byte-accurate.
+# ---------------------------------------------------------------------------
+
+# Parallel arrays describing every selectable version (filled newest-first).
+A_SHORT=(); A_BUILD=(); A_DATE=(); A_INSTALLED=(); A_MARK=()
+VIS=(); FILTER=""; CUR=0; TOP=0; MARKS=0
+
+get_term_size() {
+  local sz
+  sz="$(stty size 2>/dev/null)" || sz="24 80"
+  LINES="${sz%% *}"; COLUMNS="${sz##* }"
+  [[ "$LINES"   =~ ^[0-9]+$ ]] || LINES=24
+  [[ "$COLUMNS" =~ ^[0-9]+$ ]] || COLUMNS=80
+}
+
+# Build the arrays from $index (SEP records), newest version first.
+tui_load() {
+  local s b fn d
+  while IFS="$SEP" read -r s b fn d; do
+    [[ -n "$s" ]] || continue
+    A_SHORT+=("$s"); A_BUILD+=("$b"); A_DATE+=("$d")
+    if [[ -f "$CASKS_DIR/btt@$s.rb" ]]; then A_INSTALLED+=(1); else A_INSTALLED+=(0); fi
+    A_MARK+=(0)
+  done < <(printf '%s\n' "$1" | sort -t"$SEP" -k1,1V -k2,2V -r)
+  return 0
+}
+
+# Indices (into A_*) matching the current filter; called only when FILTER changes.
+rebuild_visible() {
+  VIS=()
+  local i
+  for i in "${!A_SHORT[@]}"; do
+    if [[ -z "$FILTER" || "${A_SHORT[i]}" == *"$FILTER"* ]]; then VIS+=("$i"); fi
+  done
+  (( CUR >= ${#VIS[@]} )) && CUR=$(( ${#VIS[@]} > 0 ? ${#VIS[@]} - 1 : 0 ))
+  return 0   # never let a false (( … )) become this function's (set -e fatal) exit status
+}
+
+recount_marks() {
+  local i; MARKS=0
+  for i in "${!A_MARK[@]}"; do [[ "${A_MARK[i]}" == "1" ]] && MARKS=$(( MARKS + 1 )); done
+  return 0
+}
+
+move() { printf '%s[%d;%dH' "$E" "$1" "$2"; }
+
+# Render one list row. args: array-index, selected(0/1)
+render_row() {
+  local idx="$1" sel="$2" mark inst line
+  if [[ "${A_MARK[idx]}" == "1" ]]; then mark="[x]"; else mark="[ ]"; fi
+  if [[ "${A_INSTALLED[idx]}" == "1" ]]; then inst="*"; else inst=" "; fi
+  line="$(printf ' %s %s  %-9s %-12s %-12s' "$mark" "$inst" \
+            "${A_SHORT[idx]}" "${A_DATE[idx]:--}" "${A_BUILD[idx]:--}")"
+  line="${line:0:COLUMNS}"
+  if [[ "$sel" == "1" ]]; then
+    printf '%s[7m%-*s%s[0m' "$E" "$COLUMNS" "$line" "$E"
+  else
+    printf '%-*s' "$COLUMNS" "$line"
+  fi
+}
+
+draw() {
+  get_term_size
+  local h=$(( LINES - 3 )); (( h < 1 )) && h=1
+  local n=${#VIS[@]}
+  (( CUR >= n )) && CUR=$(( n > 0 ? n - 1 : 0 ))
+  (( CUR < TOP )) && TOP=$CUR
+  (( CUR >= TOP + h )) && TOP=$(( CUR - h + 1 ))
+  (( TOP < 0 )) && TOP=0
+
+  printf '%s[2J%s[H' "$E" "$E"
+  local title=" BetterTouchTool - select versions to add   (frarredondo/btt-tap)"
+  move 1 1; printf '%s[7m%-*s%s[0m' "$E" "$COLUMNS" "${title:0:COLUMNS}" "$E"
+
+  move 2 1; printf '%s[K filter: %s' "$E" "${FILTER:--}"
+  local meta; meta="$(printf 'shown %d/%d   marked %d   (* = already a cask)' "$n" "${#A_SHORT[@]}" "$MARKS")"
+  (( COLUMNS > ${#meta} + 2 )) && { move 2 $(( COLUMNS - ${#meta} )); printf '%s' "$meta"; }
+
+  local i vi
+  for (( i = 0; i < h; i++ )); do
+    move $(( 3 + i )) 1
+    vi=$(( TOP + i ))
+    if (( vi >= n )); then printf '%s[K' "$E"; continue; fi
+    if (( vi == CUR )); then render_row "${VIS[vi]}" 1; else render_row "${VIS[vi]}" 0; fi
+  done
+
+  local foot=" j/k up/down  g/G top/bottom  space mark  a mark-all  c clear  enter generate  0-9 filter  q quit"
+  move "$LINES" 1; printf '%s[7m%-*s%s[0m' "$E" "$COLUMNS" "${foot:0:COLUMNS}" "$E"
+}
+
+# Read one keypress, echo a token. bash-3.2 safe (integer read -t only).
+read_key() {
+  local k r
+  IFS= read -rsn1 k || { echo QUIT; return; }
+  if [[ "$k" == "$E" ]]; then
+    IFS= read -rsn2 -t 1 r 2>/dev/null || true   # arrows arrive instantly; lone Esc waits ~1s
+    case "$r" in                                 # $k is ESC; $r is the rest of the sequence
+      '[A') echo UP ;; '[B') echo DOWN ;; '[C') echo RIGHT ;; '[D') echo LEFT ;;
+      *) echo ESC ;;
+    esac
+    return
+  fi
+  case "$k" in
+    ''|$'\n'|$'\r') echo ENTER ;;
+    ' ')            echo SPACE ;;
+    $'\x7f'|$'\b')  echo BKSP ;;
+    [0-9.])         echo "F:$k" ;;
+    j|J) echo DOWN ;; k|K) echo UP ;;
+    g) echo TOP ;; G) echo BOTTOM ;;
+    a|A) echo MARKALL ;; c|C) echo CLEAR ;;
+    q|Q) echo QUIT ;;
+    *) echo OTHER ;;
+  esac
+}
+
+# Generate every marked version (or the highlighted one if nothing is marked).
+generate_marked() {
+  local i idx ok=0 fail=0 targets=()
+  for i in "${!A_MARK[@]}"; do [[ "${A_MARK[i]}" == "1" ]] && targets+=("$i"); done
+  if (( ${#targets[@]} == 0 )); then
+    (( ${#VIS[@]} == 0 )) && return 0
+    targets=("${VIS[CUR]}")
+  fi
+  teardown_terminal
+  printf 'Generating %d cask(s)...\n' "${#targets[@]}"
+  for idx in "${targets[@]}"; do
+    printf '\n=== btt@%s ===\n' "${A_SHORT[idx]}"
+    if gen_one "${A_SHORT[idx]}" "${A_BUILD[idx]}"; then
+      A_INSTALLED[idx]=1; A_MARK[idx]=0; ok=$(( ok + 1 ))
+    else
+      fail=$(( fail + 1 ))
+    fi
+  done
+  recount_marks
+  printf '\n%d generated, %d failed.  Press any key to return...' "$ok" "$fail"
+  IFS= read -rsn1 _ || true
+  setup_terminal
+}
+
+run_tui() {                          # arg: $index
+  { [[ -t 0 ]] && [[ -t 1 ]]; } || die "the interactive TUI needs a terminal (try --list or <version>)"
+  tui_load "$1"
+  (( ${#A_SHORT[@]} == 0 )) && die "no versions parsed from the index"
+  rebuild_visible
+  setup_terminal
+  local key idx vidx
+  while true; do
+    draw
+    key="$(read_key)"
+    case "$key" in
+      UP)     (( CUR > 0 )) && CUR=$(( CUR - 1 )) || true ;;
+      DOWN)   (( CUR < ${#VIS[@]} - 1 )) && CUR=$(( CUR + 1 )) || true ;;
+      TOP)    CUR=0 ;;
+      BOTTOM) CUR=$(( ${#VIS[@]} > 0 ? ${#VIS[@]} - 1 : 0 )) ;;
+      SPACE)
+        if (( ${#VIS[@]} > 0 )); then
+          idx="${VIS[CUR]}"
+          if [[ "${A_MARK[idx]}" == "1" ]]; then A_MARK[idx]=0; else A_MARK[idx]=1; fi
+          recount_marks
+        fi ;;
+      MARKALL)
+        if (( ${#VIS[@]} > 0 )); then
+          for vidx in "${VIS[@]}"; do [[ "${A_INSTALLED[vidx]}" == "1" ]] || A_MARK[vidx]=1; done
+          recount_marks
+        fi ;;
+      CLEAR)
+        for idx in "${!A_MARK[@]}"; do A_MARK[idx]=0; done; MARKS=0 ;;
+      ENTER)  generate_marked ;;
+      F:*)    FILTER="$FILTER${key#F:}"; CUR=0; TOP=0; rebuild_visible ;;
+      BKSP)   FILTER="${FILTER%?}"; CUR=0; TOP=0; rebuild_visible ;;
+      QUIT|ESC) break ;;
+      *) : ;;
+    esac
+  done
+  teardown_terminal
 }
 
 main() {
   local mode="" target="" index match s b fn reldate
-  [[ $# -eq 0 ]] && { usage; exit 2; }
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --tui|-i) mode="tui" ;;
       --latest) mode="latest" ;;
       --list)   mode="list" ;;
       --force)  FORCE=1 ;;
@@ -224,12 +426,19 @@ main() {
     esac
     shift
   done
-  [[ -z "$mode" ]] && { usage; exit 2; }
+  # No mode given: open the TUI on an interactive terminal, otherwise print usage.
+  if [[ -z "$mode" ]]; then
+    if [[ -t 0 && -t 1 ]]; then mode="tui"; else usage; exit 2; fi
+  fi
 
+  [[ "$mode" == "tui" ]] && info "fetching release index..."
   index="$(parse_index)" || die "failed to fetch release index from $RELEASES_URL"
   [[ -n "$index" ]] || die "release index is empty — network issue or upstream layout changed"
 
   case "$mode" in
+    tui)
+      run_tui "$index"
+      ;;
     list)
       printf '%-10s %-12s %-12s %s\n' "VERSION" "DATE" "BUILD" "TOKEN"
       printf '%s\n' "$index" | sort -t"$SEP" -k1,1V -k2,2V | while IFS="$SEP" read -r s b fn reldate; do

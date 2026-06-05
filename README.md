@@ -47,16 +47,50 @@ builds, and this tap turns any of them into a one-line `brew install`.
 
 ## Add another version
 
-Use the included generator. It looks the version up in the live folivora.ai index (so it never
-guesses a dead URL), verifies the download exists, hashes it, and writes the cask:
+The included `generate.sh` looks a version up in the live folivora.ai index (so it never guesses a
+dead URL), verifies the download exists, reads the app's minimum macOS, hashes the zip, and writes
+the cask.
+
+### Interactive (TUI)
+
+Run it with no arguments in a terminal to browse, filter, and **multi-select** versions:
 
 ```sh
-./generate.sh 5.612            # add a specific version
-./generate.sh --latest         # add the newest published version
-./generate.sh --list           # list all available versions (no download)
+./generate.sh
 ```
 
-Then install it (and optionally commit + push the new cask to share it):
+A pure-bash interactive list (no dependencies) opens — newest first, with each version's release
+date and build, and a `*` next to versions already in this tap:
+
+```
+ BetterTouchTool - select versions to add   (frarredondo/btt-tap)
+ filter: 4.36                         shown 12/2875   marked 2   (* = already a cask)
+ [ ] * 4.363     2023-12-23   43630
+ [x]   4.362     2023-12-21   43620
+ [x]   4.361     2023-12-20   43610
+ ...
+ j/k up/down  g/G top/bottom  space mark  a mark-all  c clear  enter generate  0-9 filter  q quit
+```
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` (or `↑` / `↓`) | move the cursor |
+| `g` / `G` | jump to top / bottom |
+| digits and `.` | filter by version (e.g. type `4.36`); `Backspace` edits |
+| `space` | mark / unmark the highlighted version |
+| `a` / `c` | mark all (currently filtered, not-yet-installed) / clear all marks |
+| `Enter` | download + generate casks for all marked versions (or the highlighted one) |
+| `q` | quit |
+
+### Non-interactive
+
+```sh
+./generate.sh 5.612            # add one specific version
+./generate.sh --latest         # add the newest published version
+./generate.sh --list           # print every available version (no download)
+```
+
+Either way, install the result (and optionally commit + push the new cask to share it):
 
 ```sh
 brew install --cask ./Casks/btt@5.612.rb
